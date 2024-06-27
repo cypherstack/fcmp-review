@@ -82,7 +82,7 @@ holds, then $g = h = t = u = v = 0$.
 When specifying relations instantiated by proving systems, we elide these generators for brevity; they are assumed to be known public parameters.
 
 Transactions consume existing outputs and generate new outputs.
-Output keys are of the form $O = x G + y T$, where $x$ is a signing key required to authorize a transaction consuming the output, and $y$ is arbitrary.
+Output keys are of the form $O = x G + y T$, where $x$ and $y$ are output signing keys required to authorize a transaction consuming the output.
 
 Output values are represented by Pedersen commitments of the form $C = c_g G + c_h H$, where $c_h$ represents the value and $c_g$ the commitment mask.
 
@@ -643,7 +643,7 @@ Since the witness values $x$ and $y$ bind computationally to $O$, this second tr
 This means $L' = x I = L$; if the verifier rejects transactions providing non-unique linking tags, the second transaction will be rejected and the desired property holds.
 
 It must also hold that the transaction was authorized by an entity possessing all signing keys for consumed outputs.
-This follows from correct use of the strong Fiat-Shamir technique properly applied to the composed proving system since valid proofs extract the signing key $x$ associated to each consumed output $O = x G + y T$ extracted in the proof.
+This follows from correct use of the strong Fiat-Shamir technique properly applied to the composed proving system since valid proofs extract the signing keys $x$ and $y$ associated to each consumed output $O = x G + y T$ extracted in the proof.
 We stress that, as noted in \cite{fs}, proper binding of statement data into challenge hashes using the strong technique is crucial to avoid generic attacks.
 
 However, we note that this non-interactive transformation must bind transaction data in a non-malleable way, which requires in part that the prover and verifier actually query the cryptographic hash function used for challenge computation to include such data as the so-called ``message'' component of the hash input.
