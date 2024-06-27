@@ -1,0 +1,707 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{nicefrac}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage{xurl}
+\usepackage[nottoc]{tocbibind}
+
+\newtheorem{theorem}{Theorem}
+\theoremstyle{definition}
+\newtheorem{protocol}{Protocol}
+
+\newcommand{\GG}{\mathbb{G}}
+\newcommand{\FF}{\mathbb{F}}
+\newcommand{\hash}{\mathsf{H}}
+\newcommand{\wt}[1]{\widetilde{#1}}
+\newcommand{\wh}[1]{\widehat{#1}}
+
+\title{FCMP++ review}
+\author{Cypher Stack\thanks{\url{https://cypherstack.com}}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+This report describes a full-chain membership proof construction and provides a relevant security analysis.
+As with any such report, it may contain errors and cannot guarantee correctness or security.
+Further, it cannot guarantee that any particular implementation of the construction is correct, secure, or suitable for intended use cases.
+
+The author asserts no warranty and disclaims liability for its use.
+The author further expresses no endorsement of any kind.
+This report has not undergone any further formal or peer review.
+
+\tableofcontents
+
+
+\section{Introduction}
+
+Full-chain membership proofs are a proposed construction intended for use in privacy-respecting transaction protocols, specifically the Monero protocol.
+They can be used to replace membership proofs in protocols like Seraphis\footnote{\url{https://github.com/UkoeHB/Seraphis/}} or as part of linkable ring signature designs for use in protocols like RingCT (as introduced in \cite{ringct}).
+
+A recent technical note\footnote{\url{https://github.com/kayabaNerve/fcmp-ringct}} describes a particular design intended to replace CLSAG linkable ring signatures from \cite{clsag} in the Monero protocol, which uses a RingCT design.
+This construction is specifically intended to be compatible with outputs generated from the current and previous versions of the protocol, which can increase practical security and reduce engineering risk.
+In this report, we examine the technical note to determine the extent to which its design meets intended security properties.
+
+The technical note seeks a construction providing the following informal properties:
+\begin{enumerate}
+	\item \label{prop:membership} All outputs consumed in a valid transaction were generated in previous valid transactions.
+	\item \label{prop:unspent} No output consumed in a valid transaction was consumed in any previous valid transaction.
+	\item \label{prop:authorized} The transaction was authorized by an entity possessing all signing keys associated to consumed outputs.
+	\item \label{prop:balance} The sum of values represented by consumed outputs in a valid transaction is equal to the sum of values represented by generated outputs (including any fees).
+	\item \label{prop:range} The value represented by each output generated in a valid transaction is within a given range.
+\end{enumerate}
+Since properties \ref{prop:balance} and \ref{prop:range} can be achieved through suitable use of existing balance and range assertions, the technical note presents a relation intended to capture the other properties.
+It then breaks this relation into two components: one effectively showing property \ref{prop:membership} using a membership proof, and the other effectively showing properties \ref{prop:unspent} and \ref{prop:authorized} using an authorization and linkability proof.
+
+
+\subsection{Summary}
+
+The construction presented in the technical note appears overall to meet its desired goals.
+However, the technical note was written with implementation in mind, and therefore was not intended to reflect particular formal presentation, notation, or analysis.
+
+This report is intended to provide such formalization, as well as specify particular component security properties that are necessary for analysis.
+It therefore makes changes to the presentation and structure of the proving systems in the technical note to allow for such analysis.
+It also provides a suggested optimization and proves it secure.
+
+
+\section{Notation}
+
+The technical note introduces notation that is important for analysis.
+While much of the notation is explained by definition or context, some is not.
+We review it here for completeness.
+
+Let $\GG$ be an elliptic curve group where the discrete logarithm problem is hard, and let $\FF$ be its scalar field.
+
+Fix group generators $G, H, T, U, V \in \GG$ with no efficiently-computable nontrivial discrete logarithm relation.
+This means that if a bounded adversary can find $g, h, t, u, v \in \FF$ such that
+$$0 = g G + h H + t T + u U + v V$$
+holds, then $g = h = t = u = v = 0$.
+When specifying relations instantiated by proving systems, we elide these generators for brevity; they are assumed to be known public parameters.
+
+Transactions consume existing outputs and generate new outputs.
+Output keys are of the form $O = x G + y T$, where $x$ is a signing key required to authorize a transaction consuming the output, and $y$ is arbitrary.
+
+Output values are represented by Pedersen commitments of the form $C = c_g G + c_h H$, where $c_h$ represents the value and $c_g$ the commitment mask.
+
+Each output consumed in a transaction comes equipped with a linking tag of the form $L = x \hash(O)$, where $\hash$ is a cryptographic hash function with codomain $\GG$.
+Note that without knowledge of $x$, it is infeasible to identify an output $O$ with its linking tag $L$.
+In the technical note, the deterministic notation $I = \hash(O)$ is used.
+
+To allow for balance computation without leaking information about consumed outputs, each consumed output comes equipped with a rerandomized commitment $\wt{C} = C + r_c G$ for random $r_c$.
+This means $\wt{C}$ is a commitment to the same value as $C$.
+
+
+\section{Security properties}
+
+The technical note does not specify security properties that should be achieved by proving systems it requires or defines.
+
+Inherent is that each such proving system be perfectly complete, which asserts that an honest verifier will always accept a proof generated by an honest prover.
+
+Another important property is computational witness-extended emulation (CWEE), a generalization of special soundness.
+This property requires the existence of an extractor, a bounded algorithm that can rewind an accepting proof transcript for a given statement with new randomness at challenge points.
+The extractor must be able to compute a valid witness for the corresponding statement using the rewound transcript tree, except possibly with negligible probability.
+It will be important and useful that proving systems be CWEE, as this allows us to reason about relationships between extracted witness values.
+We therefore require that proving systems under consideration be CWEE.
+
+Also useful is the special honest-verifier zero knowledge (SHVZK) property.
+This property requires the existence of a simulator, a bounded algorithm that samples verifier randomness on a given statement; the simulator must be able to use this to produce valid transcripts that are identically distributed to those of honestly-generated proofs, but without knowledge of a corresponding witness.
+It provides a related (but weaker) property, witness indistinguishability, which asserts that an adversary cannot determine the witness used to produce a valid proof.
+We require that proving systems under consideration be SHVZK.
+
+Finally, a less common property is simulation extractibility.
+This property, examined in \cite{sim_ext}, effectively requires that a bounded adversary in possession of valid (possibly simulated) proofs be required to produce an extracted witness for subsequent proofs that it produces.
+The property is useful in part because it relates to a notion of non-malleability.
+It holds for certain classes of proving systems, but does not immediately follow from CWEE in general.
+We therefore do not specifically require this for proving systems under consideration, but consider it beneficial.
+
+Throughout this report, we require the conversion of interactive protocols to non-interactive equivalents using the strong Fiat-Shamir technique, formalized in \cite{fs}.
+This requires the prover and verifier to maintain a transcript of the statement used in the proving relation instance, as well as all elements transmitted from the prover to the verifier.
+Verifier challenges are produced through the use of a cryptographic hash function evaluation (with suitable domain separation) on the transcript.
+We stress the importance of maintaining this transcript and computing challenges securely, as failure to do so can result in exploitable loss of intended security properties, as in the examples of \cite{weak_fs}.
+
+
+\section{Main relation}
+
+The technical note seeks an instantiation of a proving system for the following relation for each consumed output in a transaction:
+\begin{multline}
+	\label{rel:original}
+	\Big\{ S \subset \GG^3, \wt{C}, L \in \GG; O, I, C \in \GG, x, y, c_g, c_h, r_c \in \FF : \\
+	(O, I, C) \in S, O = x G + y T, L = x I, C = c_g G + c_h H, \wt{C} = C + r_c G \Big\}
+\end{multline}
+The technical note indicates that witness elements are integers in $\mathbb{Z}$, which is incorrect notation; we correct this here.
+We also slightly modify the presentation of $\wt{C}$ (but not its effective definition) here for clarity.
+
+The technical note specifies that the proving systems it introduces satisfy relation \ref{rel:original}, which is not strictly the case.
+While its membership proving system (which we discuss later) proves that a given group element $\wt{C}$ offsets a value $C$ in an ambiguous way, it does not extract an opening $(c_g, c_h)$ of $C$ as a witness in the relation, violating our CWEE requirement.
+
+However, this is not problematic in practice, as the use of a suitable range proving system associated to transactions provides such an opening that must be unique up to the hardness of the discrete logarithm problem.
+Consumed outputs in the Monero protocol correspond to generated outputs with associated range proofs that use either a variant of Borromean ring signatures \cite{borromean} or the Bulletproofs \cite{bp} or Bulletproofs+ \cite{bpp} range proving systems.
+
+Both the Bulletproofs and Bulletproofs+ range proving systems are CWEE and SHVZK.
+Further, work in \cite{bp_agm} (for the algebraic group model) and \cite{bp_rom} (for the random oracle model) shows that the Bulletproofs design is simulation extractible.
+The Borromean range proof construction admits an extractor (referred to as a simulator in \cite{borromean}) as required for CWEE.
+While it is specified to be ``zero knowledge'', the definition in \cite{borromean} is more akin to witness indistinguishability; the corresponding proof of this property is informal, but likely would apply to SHVZK as well.
+
+We therefore modify relation \ref{rel:original} to remove the opening of $C$, allowing us to perform a more complete and correct analysis that does not rely on externally-provided range proofs:
+\begin{multline}
+	\label{rel:main}
+	\Big\{ S \subset \GG^3, \wt{C}, L \in \GG; O, I, C \in \GG, x, y, r_c \in \FF : \\
+	(O, I, C) \in S, O = x G + y T, L = x I, \wt{C} = C + r_c G \Big\}
+\end{multline}
+
+In practice, this achieves the desired security properties.
+
+Property \ref{prop:membership}, which asserts that a consumed output exist, is trivially satisfied by membership in $S$, the set of previously-generated outputs.
+
+Property \ref{prop:unspent} states that a consumed output not have been previously consumed.
+This follows since the mapping $x \mapsto I$ between output signing keys and linking tags is deterministic.
+
+Property \ref{prop:authorized} is that a transaction be authorized by a holder of all consumed output signing keys.
+This can be achieved by instantiating a proving system for the relation in a non-interactive manner that binds transaction details as part of the strong Fiat-Shamir technique.
+
+Property \ref{prop:balance} asserts transaction balance.
+The definitions of $C$ and $\wt{C}$ mean that $\wt{C}$ is a Pedersen commitment to the same value $c_h$ as $C$.
+In the Monero protocol, all commitment masks used in generated outputs are deterministically generated such that they are uniformly distributed at random.
+All consumed output rerandomized commitment masks are sampled uniformly at random except one, which is chosen such that the difference between generated output commitments and consumed output rerandomized commitments is zero.
+From this observation, the balance security requirement is achieved.
+However, we note that this means the set of commitment masks is not independently sampled, which means that knowledge of the sum of all but one such mask leaks the remaining one.
+
+Property \ref{prop:range} states that generated output values are within a valid range.
+This is achieved by the use of range proofs that accompany each transaction, as discussed.
+
+
+\section{Membership proving system}
+
+The technical note specifies a requirement for a proving system for the following relation:
+\begin{multline}
+	\label{rel:membership}
+	\Big\{ S \subset \GG^3, \wt{O}, \wt{I}, \wt{C}, R \in \GG ; O, I, C \in \GG, r_o, r_i, r_j, r_c \in \FF : \\
+	(O, I, C) \in S, \wt{O} = O + r_o T, \wt{I} = I + r_i U, \wt{C} = C + r_c G, R = r_i V + r_j T \Big\}
+\end{multline}
+It does not immediately instantiate such a proving system, but notes that it does so later using an approach based on \cite{curve_trees}.
+
+It is unspecified what security requirements a proving system for relation \ref{rel:membership} must satisfy.
+As discussed earlier, we require that such a proving system be complete, CWEE, and SHVZK.
+
+We note that the select-and-rerandomize construction in \cite{curve_trees} comes equipped with a proof of an associated binding property that does effectively achieve CWEE through its use of extractors of constituent protocols.
+Further, the design in \cite{curve_trees} also has an associated zero-knowledge property that effectively satisfies SHVZK.
+
+The analysis in \cite{curve_trees} does not directly claim or show that its design satisfies simulation extractibility.
+However, it internally uses a circuit-based design based on the Bulletproofs arithmetic circuit satisfiability proving system in \cite{bp}, albeit using modifications\footnote{\url{https://github.com/cypherstack/generalized-bulletproofs}} required to handle vector commitments.
+Work in \cite{bp_agm, bp_rom,bp_spartan_simext} shows that the Bulletproofs design is simulation extractible, and we hypothesize that the vector commitment modifications do not affect this.
+However, it is not clear that the overall membership proving system instantiation must inherit this property.
+Further examination into this would be useful, but is out of scope here.
+
+
+\section{Spend authorization and linkability proving systems}
+
+The technical note specifies a requirement for a proving system for the following relation:
+\begin{multline}
+	\label{rel:auth_link}
+	\Big\{ \wt{O}, \wt{I}, R, L \in \GG ; x', y', r_i', r_j' : \\
+	\wt{O} = x' G + y' T, R = r_i' V + r_j' T, L = x' \wt{I} - (x' r_i') U \Big\}
+\end{multline}
+Note that we slightly modify the notation for witnesses; this is for consistency and ease of later analysis.
+
+It is then stated that this relation may be instantiated by composing the Bulletproofs+ weighted inner-product argument from \cite{bpp} and a Schnorr-based protocol from \cite{schnorr}, both of which are then described.
+We make the nature of this composition more clear later.
+
+As with relations \ref{rel:main} and \ref{rel:membership}, security requirements for such instantiations are unspecified, but are described in more formal detail in the cited references.
+For proper composition, we again require that CWEE and SHVZK be satisfied.
+
+While these properties are satisfied for relations specific to the weighted inner-product and Schnorr protocols that are not given, CWEE does not hold for relation \ref{rel:auth_link}.
+This is the case since the witness value $r_j$ is not extractible from the combined proving systems.
+However, this is not problematic in practice if relation \ref{rel:auth_link} is replaced by relations for the two protocols and composed properly with relation \ref{rel:membership} to then satisfy relation \ref{rel:main}.
+We show later how to do this.
+
+
+\subsection{Weighted inner-product proving system}
+
+One proving system used to instantiate relation \ref{rel:auth_link} is a weighted inner-product argument from \cite{bpp}.
+It is an instantiation of the following relation:
+\begin{equation}
+	\label{rel:wip}
+	\Big\{ P \in \GG ; x', r_i', r_p' \in \FF ; P = x' G + r_i' V + (x' r_i') U + r_p' T \Big\}
+\end{equation}
+The notation used for witness values is slightly modified here for ease of analysis.
+As shown in \cite{bpp}, the proving system is CWEE and SHVZK.
+
+The technical note reproduces the interactive protocol, but also uses different notation.
+While this is not a problem (the notation is arbitrary), it incorrectly uses $y$ in the prover's definition of $A$.
+This should be replaced with $r_i$, which then matches (up to the modified notation) the protocol in \cite{bpp}.
+
+
+\subsection{Schnorr protocol}
+
+The other proving system used to instantiate relation \ref{rel:auth_link} is a Schnorr-like protocol for a relation that is not given, but described as using techniques from \cite{schnorr}.
+We give the relation here:
+\begin{multline}
+	\label{rel:schnorr}
+	\Big\{ \wt{O}, P, R, L, \wt{I} \in \GG ; x'', y'', z'', r_p'' \in \FF : \\
+	\wt{O} = x'' G + y'' T, P - \wt{O} - R = z'' U + r_p'' T, L = x'' \wt{I} - z'' U \Big\}
+\end{multline}
+We again modify witness notation for clearer analysis.
+
+While the technical note provides the interactive protocol, we do so here with our modified notation for clarity:
+\begin{itemize}
+	\item The prover samples $r_x, r_y, r_z, r_{r_p} \in \FF$ and computes the following:
+	\begin{eqnarray*}
+		R_O &=& r_x G + r_y T \\
+		R_P &=& r_z U + r_{r_p} T \\
+		R_L &=& r_x \wt{I} - r_z U
+	\end{eqnarray*}
+	\item The prover sends $R_O, R_P, R_L$ to the verifier.
+	\item The verifier samples a challenge $e \in \FF$ and sends it to the prover.
+	\item The prover computes
+	\begin{eqnarray*}
+		s_x &=& r_x + e x'' \\
+		s_y &=& r_y + e y'' \\
+		s_z &=& r_z + e z'' \\
+		s_{r_p} &=& r_{r_p} + e r_p''
+	\end{eqnarray*}
+	and sends these values to the verifier.
+	\item The verifier accepts the proof if and only if the following hold:
+	\begin{eqnarray*}
+		R_O + e \wt{O} &=& s_x G + s_y T \\
+		R_P + e (P - \wt{O} - R) &=& s_z U + s_{r_p} T \\
+		R_L + e L &=& s_x \wt{I} - s_z U
+	\end{eqnarray*}
+\end{itemize}
+
+The protocol can be made non-interactive using the (strong) Fiat-Shamir technique.
+
+We now show that the protocol has desired security properties.
+Specifically, we do so to aid later work, which will use the extractor algorithm we define here to show CWEE for another protocol.
+
+\begin{theorem}
+	The protocol presented for relation \ref{rel:schnorr} is perfectly complete, and satisfies CWEE and SHVZK.
+\end{theorem}
+
+\begin{proof}
+	Perfect completeness follows immediately by inspection.
+
+	To show CWEE, we construct an extractor that produces a valid witness given a tree of accepting transcripts on arbitrary rewinding.
+	The extractor fixes a statement and partial accepting transcript $(R_O, R_P, R_L)$.
+	It rewinds a single time to obtain distinct challenges $e \neq e'$ and corresponding partial accepting transcripts $(s_x, s_y, s_z, s_{r_p})$ and $(s_x', s_y', s_z', s_{r_p}')$.
+	Using both transcripts, the first verification equation yields
+	$$(e - e') \wt{O} = (s_x - s_x') G + (s_y - s_y') T$$
+	from which we obtain that
+	$$\wt{O} = \left(\frac{s_x - s_x'}{e - e'}\right) G + \left(\frac{s_y - s_y'}{e - e'}\right) T$$
+	that is well defined since $e - e' \neq 0$.
+	Similarly, we obtain that
+	$$P - \wt{O} - R = \left(\frac{s_z - s_z'}{e - e'}\right) U + \left(\frac{s_{r_p} - s_{r_p}'}{e - e'}\right) T$$
+	and
+	$$L = \left(\frac{s_x - s_x'}{e - e'}\right) \wt{I} + \left(\frac{s_z - s_z'}{e - e'}\right) U$$
+	from the remaining verification equations.
+	This gives the witness extractions
+	\begin{eqnarray*}
+		x'' &=& \frac{s_x - s_x'}{e - e'} \\
+		y'' &=& \frac{s_y - s_y'}{e - e'} \\
+		z'' &=& \frac{s_z - s_z'}{e - e'} \\
+		r_p'' &=& \frac{s_{r_p} - s_{r_p}'}{e - e'}
+	\end{eqnarray*}
+	and the protocol is CWEE.
+
+	To show SHVZK, we construct a simulator that produces transcripts distributed identically to those of real proofs.
+	Fix a statement and sampled challenge $e$.
+	The simulator first samples $s_x, s_y, s_z, s_{r_p}$ uniformly at random.
+	It then sets
+	\begin{eqnarray*}
+		R_O &=& s_x G + s_y T - e \wt{O} \\
+		R_P &=& s_z U + s_{r_p} T - e(P - \wt{O} - R) \\
+		R_L &=& s_x \wt{I} - s_z U - e L
+	\end{eqnarray*}
+	to satisfy the verification equations.
+\end{proof}
+
+
+\subsection{Conjunction}
+
+It is possible to combine the weighted inner-product and Schnorr proving systems.
+This has two benefits: it reduces the communication complexity, and also aids in analysis of a later composition with the proving system used for relation \ref{rel:membership}.
+
+The combined proving system is an instantiation of the following relation, which combines relations \ref{rel:wip} and \ref{rel:schnorr} as a conjunction:
+\begin{multline}
+	\label{rel:combined}
+	\Big\{ P, \wt{O}, R, L, \wt{I} \in \GG ; x', r_i', r_p', x'', y'', z'', r_p'' \in \FF : \\
+	P = x' G + r_i' V + (x' r_i') U + r_p' T, \\
+	\wt{O} = x'' G + y'' T, P - \wt{O} - R = z'' U + r_p'' T, L = x'' \wt{I} - z'' U \Big\}
+\end{multline}
+
+While it is well known how to produce an interactive protocol to show such a conjunction, this would not provide any communication complexity benefit.
+This technique requires that each constituent interactive protocol be run in parallel, using a common challenge derived from the combined transcript.
+
+However, observe that in the weighted inner-product protocol, the prover samples $\alpha \in \FF$ and sends $s_\alpha = \alpha + e x'$ to the verifier.
+In the Schnorr protocol, the prover samples $r_x \in \FF$ and sends $s_x = r_x + e x''$ to the verifier.
+This means that if $x' = x''$ in relation \ref{rel:combined}, we have $s_\alpha = r_x$ if $\alpha = r_x$.
+
+\begin{protocol}
+	The following is an instantiation of relation \ref{rel:combined}:
+	\begin{itemize}
+		\item The prover samples $\alpha, \beta, \delta, \mu, r_y, r_z, r_{r_p} \in \FF$ uniformly at random.
+		\item The prover computes the following:
+		\begin{eqnarray*}
+			A &=& \alpha G + \beta V + (\alpha r_i' + \beta x') U + \delta T \\
+			B &=& (\alpha \beta) U + \mu T \\	
+			R_O &=& \alpha G + r_y T \\
+			R_P &=& r_z U + r_{r_p} T \\
+			R_L &=& \alpha \wt{I} - r_z U
+		\end{eqnarray*}
+		\item The prover sends $A, B, R_O, R_P, R_L$ to the verifier.
+		\item The verifier samples a challenge $e \in \FF$ and sends it to the prover.
+		\item The prover computes
+		\begin{eqnarray*}
+			s_\alpha &=& \alpha + e x' \\
+			s_\beta &=& \beta + e r_i' \\
+			s_\delta &=& \mu + e \delta + e^2 r_p' \\
+			s_y &=& r_y + e y'' \\
+			s_z &=& r_z + e z'' \\
+			s_{r_p} &=& r_{r_p} + e r_p''
+		\end{eqnarray*}
+		and sends these values to the verifier.
+		\item The verifier accepts the proof if and only if the following hold:
+		\begin{eqnarray*}
+			e^2 P + e A + B &=& (s_\alpha e) G + (s_\beta e) V + (s_\alpha s_\beta) U + s_\delta T \\
+			R_O + e \wt{O} &=& s_\alpha G + s_y T \\
+			R_P + e (P - \wt{O} - R) &=& s_z U + s_{r_p} T \\
+			R_L + e L &=& s_\alpha \wt{I} - s_z U
+		\end{eqnarray*}
+	\end{itemize}
+\end{protocol}
+
+This construction does not follow the standard approach for sigma protocol conjunction since the prover uses common randomness to sample $\alpha = r_x$ in the two constituent protocols, so we cannot immediately claim that CWEE and SHVZK hold.
+Further, it is not even the case that the protocol is complete, since this only holds in the case where $x' = x''$.
+However, both CWEE and SHVZK hold even when $x' \neq x''$.
+We will show later that this restriction on completeness is sufficient for the intended use case.
+
+\begin{theorem}
+	The protocol presented for relation \ref{rel:combined} satisfies CWEE, SHVZK, and simulation extractibility.
+	It is perfectly complete if $x' = x''$.
+\end{theorem}
+
+\begin{proof}
+	Perfect completeness immediately follows by inspection if $x' = x''$.
+
+	To show CWEE, we construct an extractor that produces a valid witness given a tree of accepting transcripts on arbitrary rewinding.
+	The extractor first runs the steps of the weighted inner-product extractor in \cite{bpp} to produce witness values $x', r_i'$ satisfying the first condition in relation \ref{rel:combined}.
+	It then runs the steps of the Schnorr extractor to produce witness values $x'', y'', z'', r_p''$ satisfying the remaining conditions.
+
+	To show SHVZK, we construct a simulator that produces transcripts distributed identically to those of real proofs, following the method used in \cite{bpp}.
+	Fix a statement $P, \wt{O}, R, L, \wt{I}$ and sampled challenge $e$.
+	The simulator first samples
+	$$A, s_\alpha, s_\beta, s_\delta, s_y, s_z, s_{r_p}$$
+	uniformly at random.
+	It then sets the following:
+	\begin{eqnarray*}
+		B &=& (s_\alpha e) G + (s_\beta e) V + (s_\alpha s_\beta) U + s_\delta T - e^2 P - e A \\
+		R_O &=& s_\alpha G + s_y T - e \wt{O} \\
+		R_P &=& s_z U + s_{r_p} T - e (P - \wt{O} - R) \\
+		R_L &=& s_\alpha \wt{I} - s_z U - e L
+	\end{eqnarray*}
+	The resulting transcript is accepting by definition.
+
+	It remains to show that the distributions of simulated and real transcripts are identical; that is, that the transcript values sampled uniformly at random by the simulator are similarly distributed in real proofs.
+	We first note that in real proofs, the values sampled uniformly at random by the prover are $\alpha, \beta, \delta, \mu, r_y, r_z, r_{r_p}$.
+	It therefore suffices to show that the mapping
+	$$(\alpha, \beta, \delta, \mu, r_y, r_z, r_{r_p}) \mapsto (\log_T A, s_\alpha, s_\beta, s_\delta, s_y, s_z, s_{r_p})$$
+	defined by the prover is a bijection.
+
+	To show that it is surjective, consider an arbitrary codomain tuple $$(\log_T A, s_\alpha, s_\beta, s_\delta, s_y, s_z, s_{r_p}) \in \FF^7$$
+	and observe that the following values constitute a preimage:
+	\begin{eqnarray*}
+		\alpha &=& s_\alpha - e x' \\
+		\beta &=& s_\beta - e r_i' \\
+		\delta &=& \log_T A - \alpha G - \beta V - (\alpha r_i' + \beta x') U \\
+		\mu &=& s_\delta - e \delta - e^2 r_p' \\
+		r_y &=& s_y - e y'' \\
+		r_z &=& s_z - e z'' \\
+		r_{r_p} &=& s_{r_p} - e r_p''
+	\end{eqnarray*}
+
+	To show that it is injective, let $\zeta_G = \log_T G, \zeta_V = \log_T V, \zeta_U = \log_T U$.
+	Then the mapping can be described by the following matrix equation:
+	\begin{equation*}
+		\begin{pmatrix}
+			\log_T A \\
+			s_\alpha \\
+			s_\beta \\
+			s_\delta \\
+			s_y \\
+			s_z \\
+			s_{r_p}
+		\end{pmatrix}
+		=
+		\begin{pmatrix}
+			\zeta_G & \zeta_V & 1 & 0 & 0 & 0 & 0 \\
+			1 & 0 & 0 & 0 & 0 & 0 & 0 \\
+			0 & 1 & 0 & 0 & 0 & 0 & 0 \\
+			0 & 0 & e & 1 & 0 & 0 & 0 \\
+			0 & 0 & 0 & 0 & 1 & 0 & 0 \\
+			0 & 0 & 0 & 0 & 0 & 1 & 0 \\
+			0 & 0 & 0 & 0 & 0 & 0 & 1 \\
+		\end{pmatrix}
+		\begin{pmatrix}
+			\alpha \\
+			\beta \\
+			\delta \\
+			\mu \\
+			r_y \\
+			r_z \\
+			r_{r_p}
+		\end{pmatrix}
+		+
+		\begin{pmatrix}
+			(\alpha r_i' + \beta x') \zeta_U \\
+			e x \\
+			e r_i' \\
+			e^2 r_p' \\
+			e y'' \\
+			e z'' \\
+			e r_p''
+		\end{pmatrix}
+	\end{equation*}
+	Suppose that $(\wh{\alpha}, \wh{\beta}, \wh{\delta}, \wh{\mu}, \wh{r}_y, \wh{r}_z, \wh{r}_{r_p})$ is another preimage to the same image.
+	Then
+	\begin{multline*}
+		\begin{pmatrix}
+			0 \\
+			0 \\
+			0 \\
+			0 \\
+			0 \\
+			0 \\
+			0 \\
+		\end{pmatrix}
+		=
+		\begin{pmatrix}
+			\zeta_G & \zeta_V & 1 & 0 & 0 & 0 & 0 \\
+			1 & 0 & 0 & 0 & 0 & 0 & 0 \\
+			0 & 1 & 0 & 0 & 0 & 0 & 0 \\
+			0 & 0 & e & 1 & 0 & 0 & 0 \\
+			0 & 0 & 0 & 0 & 1 & 0 & 0 \\
+			0 & 0 & 0 & 0 & 0 & 1 & 0 \\
+			0 & 0 & 0 & 0 & 0 & 0 & 1 \\
+		\end{pmatrix}
+		\begin{pmatrix}
+			\alpha - \wh{\alpha} \\
+			\beta - \wh{\beta} \\
+			\delta - \wh{\delta} \\
+			\mu - \wh{\mu} \\
+			r_y - \wh{r}_y \\
+			r_z - \wh{r}_z \\
+			r_{r_p} - \wh{r}_{r_p}
+		\end{pmatrix} \\
+		+
+		\begin{pmatrix}
+			(\alpha r_i' + \beta x' - \wh{\alpha} r_i' - \wh{\beta} x') \zeta_U \\
+			0 \\
+			0 \\
+			0 \\
+			0 \\
+			0 \\
+			0 \\
+		\end{pmatrix}
+	\end{multline*}
+	holds.
+	This immediately gives the following equalities:
+	\begin{eqnarray*}
+	\alpha &=& \wh{\alpha} \\
+	\beta &=& \wh{\beta} \\
+	r_y &=& \wh{r}_y \\
+	r_z &=& \wh{r}_z \\
+	r_{r_p} &=& \wh{r}_{r_p}
+	\end{eqnarray*}
+	Substituting these values, we find $\delta = \wh{\delta}$ and $\mu = \wh{\mu}$ as well.
+
+	To show simulation extractibility, we use the result of \cite{sim_ext}.
+	This gives the property if the protocol has quasi-unique responses, which means that a bounded adversary cannot produce accepting transcripts on the same statement, initial transcript, and challenge that differ in the complete transcript.
+	In order to show quasi-unique responses, we examine the verification equations for the protocol, fixing a statement $(P, \wt{O}, R, L, \wt{I})$, initial transcript $(A, B, R_O, R_P, R_L)$, and challenge $e$.
+
+	In the first verification equation
+	$$e^2 P + e A + B = (s_\alpha e) G + (s_\beta e) V + (s_\alpha s_\beta) U + s_\delta T$$
+	observe that if two accepting transcripts differ in the tuple $(s_\alpha, s_\beta, s_\delta)$, then the adversary has produced distinct openings for $e^2 P + e A + B$ with respect to generators $(G, V, U, T)$; this is a contradiction since these generators are independent and such an opening breaks computational binding.
+	Similarly, from the second verification equation
+	$$R_O + e \wt{O} = s_\alpha G + s_y T$$
+	observe that transcripts differing in $(s_\alpha, s_y)$ result in distinct openings for $R_O + e \wt{O}$ with respect to $(G, T)$, again a contradiction.
+	Finally, from the third verification equation
+	$$R_P + e (P - \wt{O} - R) = s_z U + s_{r_p} T$$
+	observe that transcripts differing in $(s_z, s_{r_p})$ result in distinct openings for $R_P + e (P - \wt{O} - R)$ with respect to $(U, T)$, also a contradiction.
+	This means the protocol has quasi-unique responses, and is therefore simulation extractible.
+\end{proof}
+
+
+\section{Composed proving system}
+
+We now describe how to compose protocols that can be described by relations \ref{rel:membership} (for membership) and \ref{rel:combined} (for spend authority and linkability) to obtain a proving system meeting the conditions of the main relation \ref{rel:main}.
+Then, we will analyze its security using the analyses of the constituent protocols.
+
+Suppose the prover wishes to generate a proof to be used in a transaction that consumes an output with the following components:
+\begin{eqnarray*}
+	O &=& x G + y T \\
+	I &=& \hash(O)
+\end{eqnarray*}
+The output also comes equipped with a value commitment $C$, but its opening is not needed here.
+Suppose that the prover has also chosen $r_c \in \FF$ such that $\wt{C} = C + r_c G$.
+Let $S \subset \GG^3$ be the set of valid outputs, such that $(O, I, C) \in S$ and $L = x I$ is the linking tag for the output.
+
+\begin{protocol}
+	The interactive protocol is as follows:
+	\begin{itemize}
+		\item The prover samples $r_o, r_i, r_j \in \FF$ uniformly at random, and computes the following:
+		\begin{eqnarray*}
+			\wt{O} &=& O + r_o T \\
+			\wt{I} &=& I + r_i U \\
+			R &=& r_i V + r_j T
+		\end{eqnarray*}
+		\item The prover runs the prover for the membership relation \ref{rel:membership} on the following input:
+		\begin{equation*}
+			\left\{ \wt{O}, \wt{I}, \wt{C}, R ; r_o, r_i, r_j, r_c, (O, I, C) \right\}
+		\end{equation*}
+		\item The prover samples $r_p' \in \FF$ uniformly at random, and computes the following:
+		\begin{equation*}
+			P = x G + r_i V + (x r_i) U + r_p' T
+		\end{equation*}
+		\item The prover runs the prover for the conjunction relation \ref{rel:combined} on the following input:
+		\begin{equation*}
+			\left\{ P, \wt{O}, R, L, \wt{I} ; x, r_i, r_p', x, y + r_o, x r_i, r_p' - y - r_o - r_j \right\}
+		\end{equation*}
+		\item The verifier runs the verifiers for each of the relations, and accepts the proof if and only if each succeeds.
+	\end{itemize}
+\end{protocol}
+
+We claim that this protocol meets the requirements of the main relation \ref{rel:main}.
+
+\begin{theorem}
+	The protocol presented for relation \ref{rel:main} is perfectly complete, and satisfies CWEE and SHVZK.
+\end{theorem}
+
+\begin{proof}
+	Perfect completeness immediately follows by inspection due to the common witness $x$ used for relation \ref{rel:combined}.
+
+	To show SHVZK, we construct a simulator that produces transcripts distributed identically to those of real proofs.
+	Given a statement and fixed challenges, the simulator first samples $\wt{O}, \wt{I}, \wt{C}, R, P \in \GG$ uniformly at random.
+	It then runs the simulators for the proving systems instantiating relations \ref{rel:membership} and \ref{rel:combined} using the corresponding statements given in the protocol.
+
+	The resulting transcript is accepting by definition.
+	To show such transcripts are distributed identically to those of real proofs, it suffices to observe that because the values $r_o, r_i, r_c, r_j, r_p'$ are sampled uniformly at random, the transcript elements $\wt{O}, \wt{I}, \wt{C}, R, P$ are independently distributed uniformly at random as well.
+
+	To show CWEE, we construct an extractor that produces a valid witness given a tree of accepting transcripts on arbitrary rewinding.
+	Given a statement, the extractor first runs the extractor for the proving system instantiating relation \ref{rel:membership} to obtain witness values $r_o, r_i, r_j, r_c, (O, I, C)$ satisfying the relation.
+	It then runs the extractor for the proving system instantiating relation \ref{rel:combined} to obtain witness values $x', r_i', r_p', x'', y'', z'', r_p''$ satisfying the relation.
+
+	In particular, we have
+	\begin{eqnarray*}
+		P - \wt{O} - R &=& z'' U + r_p'' T \\
+		&=& (x' G + r_i' V + (x' r_i') U + r_p' T) - (x'' G + y'' T) - (r_i V + r_j T)
+	\end{eqnarray*}
+	If the discrete logarithm problem is hard in $\GG$ and all group generators are independently sampled uniformly at random, we can compare coefficients of each generator separately (or else the extractor has produced a nontrivial discrete logarithm relation).
+	In particular, we obtain the following:
+	\begin{eqnarray*}
+		z'' &=& x' r_i' \\
+		x' &=& x'' \\
+		r_i' &=& r_i
+	\end{eqnarray*}
+	Then
+	\begin{eqnarray*}
+		L &=& x'' \wt{I} - z'' U \\
+		&=& x' (I + r_i U) - (x' r_i) U \\
+		&=& x' I
+	\end{eqnarray*}
+	and since
+	\begin{eqnarray*}
+		O + r_o T &=& x'' G + y'' T \\
+		&=& x' G + y'' T
+	\end{eqnarray*}
+	it follows that $O = x' G + (y'' - r_o) T$.
+
+	This provides the required witness $x = x', y = y'' - r_o, (O, I, C)$ corresponding to the statement and completes the proof.
+\end{proof}
+
+Note that we do not claim that the protocol is simulation extractible.
+As discussed earlier, it may not be the case that the protocol used to instantiate the membership relation is simulation extractible.
+Even if so, it may not be the case that the protocol's use of multiple rounds satisfies the result of \cite{bp_rom}, which places additional requirements on quasi-unique responses; this is out of scope.
+
+
+\section{Analysis}
+
+
+\subsection{Security properties}
+
+Previously, we introduced informal security properties that a transaction protocol built from this construction must possess.
+Using this analysis, we can show how these properties might hold if the construction is suitably integrated into such a protocol.
+
+First, it must be the case that all outputs consumed in a transaction be generated in previous transactions.
+This follows directly from the extraction of a witness tuple $(O, I, C)$ that exists in the set $S$ of valid transaction outputs.
+
+Next, no output consumed in a valid transaction may have been consumed in any previous transaction.
+To show this, we observe that extraction provides $x$ and $y$ such that $O = x G + y T$ and $L = x I$.
+Suppose another transaction consumes $O$ and presents the linking tag $L'$ as part of its statement.
+Since the witness values $x$ and $y$ bind computationally to $O$, this second transaction must contain a proof extracting these values.
+This means $L' = x I = L$; if the verifier rejects transactions providing non-unique linking tags, the second transaction will be rejected and the desired property holds.
+
+It must also hold that the transaction was authorized by an entity possessing all signing keys for consumed outputs.
+This follows from correct use of the strong Fiat-Shamir technique properly applied to the composed proving system since valid proofs extract the signing key $x$ associated to each consumed output $O = x G + y T$ extracted in the proof.
+We stress that, as noted in \cite{fs}, proper binding of statement data into challenge hashes using the strong technique is crucial to avoid generic attacks.
+
+However, we note that this non-interactive transformation must bind transaction data in a non-malleable way, which requires in part that the prover and verifier actually query the cryptographic hash function used for challenge computation to include such data as the so-called ``message'' component of the hash input.
+This would not occur, for example, in the (malicious) edge case where all statement and transcript elements multiplicatively applied to the challenge $e$ are zero; in this case, the adversary could trivially bind any message of its choice since neither it nor the verifier need query the hash function on the message.
+Such a case may be easily avoided by requiring that at least one such value be nonzero.
+Fortunately, the Monero protocol already requires that $L \neq 0$ as an added verifier check, which is sufficient.
+This assertion should be retained.
+
+
+\subsection{Denial of service via slanderability}
+
+We note a property not directly referenced and therefore out of scope: that an entity possessing the signing key associated to an output be able to produce a proof consuming it that a verifier will accept.
+This is not trivial, in part because it relies on the structure of linking tags.
+Such a property is not captured by the informal security requirements of the technical note; however, we mention it here since the relationship between linking tags and outputs defined here is different from the existing Monero protocol.
+
+Specifically, in the existing Monero protocol, output keys are of the form $O = x G$ and linking tags are $L = x I = x \hash(O)$.
+In the updated protocol, output keys are of the form $O = x G + y T$, with the same linking tag definition.
+This means that existing analysis of Monero protocol security does not necessarily translate to the updated design.
+
+To demonstrate the idea, suppose an honest transaction extracts an opening $O = x G + y T$ to a consumed output and reveals the linking tag $L = x I = x \hash(O)$.
+An adversary may attempt to generate a valid transaction extracting an opening $O' = x' G + y' T$ to a different consumed output that reveals the linking tag $L' = x I' = x' \hash(O')$.
+The adversary succeeds if $L = L'$; that is, if $x \hash(O) = x' \hash(O')$.
+In this case, if the adversary's transaction is accepted by the network before the honest transaction, the honest transaction will be rejected, and the adversary has executed a denial of service.
+
+One approach to analyzing this attack is the concept of non-slanderability, which is addressed for the Monero protocol in \cite{holistic} and for the related Omniring transaction protocol in \cite{omniring}.
+Intuitively, it should be infeasible for the adversary to produce targeted collisions against honest linking tags.
+
+In \cite{omniring}, an instantiation of a specific transaction protocol design has the non-slanderability property if an adversary can produce a valid transaction whose linking tag matches that of an honest transaction using a particular security game.
+This relates to unforgeability through a property showing that linking tags bind computationally to outputs.
+Non-slanderability is then proven for the Omniring transaction protocol by reducing the success of such an adversary to a break of a one-way property of the linking tag construction; this property is shown to hold for the linking tag design currently used in the Monero protocol as well.
+We note that the one-way linking tag property is proven in a manner intended to capture Monero-style output construction using derived one-time addresses, whereas the technical note defines output signing keys more generally.
+
+In \cite{holistic}, a comprehensive security model for the Monero transaction protocol is introduced under the algebraic group model.
+It defines non-slanderability in a similar manner, but using different definitions and security games.
+The property is proven for the Monero protocol and its linking tag structure using a general lemma applied to specific kinds of oracle queries.
+While this lemma does not directly rely on the algebraic group model, its application to a non-slanderability game does.
+
+It is difficult to definitely claim that the methods and conclusions in \cite{omniring} and \cite{holistic} apply here.
+As noted, both methods of proof assume different security games as part of a specific transaction security model; the technical note does not construct its proving relations as part of either security model.
+Additionally, the individual results about the Monero linking tag structure (where $y = 0$) do not directly apply to the modified linking tag construction.
+We expect, however, that the well-structured nature of the constituent proving systems would be amenable to the design of \cite{holistic}, though reliance on the algebraic group model may be undesirable.
+
+
+\subsection{Post-quantum forward secrecy}
+
+The technical note defines forward secrecy in a post-quantum context, assuming efficient computation of arbitrary discrete logarithms in $\GG$.
+Specifically, it describes an algorithm (via a separately-provided script) that, given a statement for relation \ref{rel:main} and corresponding valid composed spend authorization and linkability proof, can reconstruct the prover's view using witness data consistent with any given output.
+Using this logic, a post-quantum adversary cannot definitively identify which outputs were consumed in a valid transaction.
+
+The construction of this algorithm is correct and meets its goal.
+However, it does not address the presence of other transaction data that must be checked by the network in order to conclude that a transaction is valid, aside from noting that verification properties involving the value commitment $C$ are likely to follow trivially from its construction as a perfectly-hiding Pedersen commitment and the ``sum-to-zero'' method used in the Monero protocol to assert balance in transactions via commitment rerandomization.
+In particular, each transaction must come equipped with a valid membership proof instantiating relation \ref{rel:membership}.
+It may be the case that the proof does not admit prover reconstruction using an arbitrary specified output as part of its witness.
+The forward secrecy property therefore depends in part on the choice of instantiation of the relation for this proof.
+
+
+\bibliographystyle{plain}
+\bibliography{main}
+
+
+\end{document}
